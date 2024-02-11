@@ -7,7 +7,7 @@ This program provides a simple neural network with inner product layer proposed 
 
 ## input data
 
-train and target data are provided in the data folder.
+Train and target data are provided in the data folder.
 They are preprocessed data in percentage of display percentage and CTR for a certain category.
 
 This program has a MIT license.
