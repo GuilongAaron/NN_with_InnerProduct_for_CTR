@@ -1,60 +1,42 @@
 import os
 import sys
-import glob
-
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy import stats
 
-import lightgbm as lgb
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import LabelEncoder
-from sklearn import preprocessing 
-from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as nnf
-import time
-import warnings
-
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-import numpy as np
+from tqdm import tqdm
 
 
 BASE_DIR = os.getcwd()
-INPUT_DIR = os.path.join(os.path.dirname(BASE_DIR), "data")
+INPUT_DIR = os.path.join(BASE_DIR, "data")
 
+# just to simply the code to put the default parameters here.
+# in formal codes, it should be in the function default settings.
 categorical_sizes = [24, 7, 4, 7, 10, 20, 100]
-embedding_size = 7
-embedding_sizes = [embedding_size for _ in range(len(categorical_sizes))]
+embedding = 7
+embedding_sizes = [embedding for _ in range(len(categorical_sizes))]
 embedding_dim = sum(embedding_sizes)  # 60  #21
 product_layer_dim = 25
 hidden_dim = 25  # sum(embedding_sizes) 20
 hidden_dim2 = 25
-# num_heads = 4  # 3
+num_heads = 4  # 3
 batch_size = 16
-epochs = 2_000
-learning_rate = 1e-5 # do not change
+epochs = 200
+learning_rate = 1e-5
 dropout_rate = 0.5
 use_user_id = False
 
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, dim_self, dim_ref, num_heads, bias=True, dropout=0.):
-
+    def __init__(self, dim_self, dim_ref, num_heads=num_heads, bias=True, dropout=0.):
         super().__init__()
         """
-        dim_self = embedding_size
-        dim_ref = optional, default = embedding_size
+        dim_self = embedding
+        dim_ref = optional, default = embedding
         """
         self.num_heads = num_heads
         head_dim = dim_self // num_heads
@@ -65,17 +47,14 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-
-        b, c = x.shape # batch, num_length, embedding size, if batch_first = True
-        _, d = x.shape # void,  num_length, embedding_size, if batch_first = True
+        b, c = x.shape # batch, num_length, embedding, if batch_first = True
+        _, d = x.shape # void,  num_length, embedding, if batch_first = True
 
         queries = self.to_queries(x).reshape(b, self.num_heads, c // self.num_heads)
-        # b 2 h dh --> expand to 4D [batch, (clip_length + pre_length), 2, num_heads, embedding_size // num_heads]
+        # b 2 h dh --> expand to 4D [batch, (clip_length + pre_length), 2, num_heads, embedding // num_heads]
         keys_values = self.to_keys_values(x).reshape(b, 2, self.num_heads, c // self.num_heads)
         keys, values = keys_values[:, :, 0], keys_values[:, :, 1]
-
         attention = torch.bmm(queries, keys.transpose(1, 2)) * self.scale
-
         attention = attention.softmax(dim=2)
 
         out = torch.matmul(attention, values).reshape(b, c)
@@ -84,9 +63,10 @@ class MultiHeadAttention(nn.Module):
 
 
 class CtrPredictionModel(nn.Module):
-    def __init__(self, num_categories_list=categorical_sizes, embedding_sizes=embedding_sizes, hidden_dim=hidden_dim):
+    def __init__(self, categories_sizes=categorical_sizes, embedding_sizes=embedding_sizes, hidden_dim=hidden_dim,
+                 product_layer_dim=product_layer_dim):
         super(CtrPredictionModel, self).__init__()        
-        self.num_categories = num_categories_list
+        self.categories_sizes = categories_sizes
         self.embedding_sizes = embedding_sizes
         self.hidden_dim = hidden_dim
 
@@ -94,7 +74,8 @@ class CtrPredictionModel(nn.Module):
         self.batch_norm0_0 = nn.BatchNorm1d(embedding_sizes)
         self.first_order_weight = nn.Parameter(torch.randn((product_layer_dim, 1)), requires_grad=True)
         self.bias = nn.Parameter(torch.randn(product_layer_dim), requires_grad=True)
-        self.second_order_weight = nn.Parameter(torch.randn((product_layer_dim, self.embedding_sizes)), requires_grad=True)
+        self.second_order_weight = nn.Parameter(torch.randn((product_layer_dim, self.embedding_sizes)),
+                                                requires_grad=True)
 
         # case 1
         self.batch_norm0 = nn.BatchNorm1d(product_layer_dim)
@@ -113,285 +94,113 @@ class CtrPredictionModel(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # x = self.fc0(x)
-        # x = self.relu(x)
-        # x = self.dropout(x)
-        # x = self.batch_norm0_0(x)
-        concat_row = x.unsqueeze(1)  # b, 1, 8
-        first_order = torch.matmul(self.first_order_weight, concat_row)  # 20, 1  X  b, 1, 8 -> # b, 20, 8
-        first_order = torch.sum(first_order, dim = 2)  # b, 20 
+
+        concat_row = x.unsqueeze(1)  # b, 1, input_size
+        first_order = torch.matmul(self.first_order_weight, concat_row)  # e.g.20, 1  X  b, 1, 8 -> # b, 20, 8
+        first_order = torch.sum(first_order, dim=2)  # b, 20
         temp = torch.matmul(concat_row.transpose(1, 2), concat_row)  # b, 8, 1  X b, 1, 8 --> b, 8, 8 
-        temp = temp.squeeze(-1) 
+        temp = temp.squeeze(-1)  # incaseof embedding layer is used. embeddings to be squeezed.
         second_order = torch.matmul(self.second_order_weight, temp)  # 20, 8  X b, 8, 8  --> b, 20, 8
-        second_order = torch.sum(second_order, dim = 2)    # b, 20    
+        second_order = torch.sum(second_order, dim=2)    # b, 20
         product_layer = first_order + second_order + self.bias  # b, 20
         x = product_layer
 
         x = self.batch_norm0(x)
-        x = self.fc1(x)  # linear
+        x = self.fc1(x)  # linear 1
         x = self.relu(x)        
         x = self.dropout(x)
 
-        resnet = self.batch_norm(x)        
-        x = self.res(resnet)  # linear
+        x = self.batch_norm(x)
+        x = self.res(x)  # linear 2
         x = self.relu(x)
         x = self.dropout(x)
 
         x = self.batch_norm2(x)
-        # x = x + resnet          # resnet addition
-        x = self.fc2(x)  # linear 
+        x = self.fc2(x)  # output layer
         x = self.sigmoid(x)
 
         return x
 
-def categorizing(total):
 
-    # categorical_columns = ["browser", "os"]
-    # frequency / counts
-    category = "user_id"
-    temp = data_recat_freq(total, [f"{category}"], 1)
-    total = encode_time_f(total, temp, [f"{category}"])
-    category = "campaign_id"
-    temp = data_recat_freq(total, [f"{category}"], total[f"{category}"].nunique())
-    total = encode_time_f(total, temp, [f"{category}"])
-    category = "main_category"
-    temp = data_recat_freq(total, [f"{category}"], total[f"{category}"].nunique())
-    total = encode_time_f(total, temp, [f"{category}"])
-    category = "sub_category"
-    temp = data_recat_freq(total, [f"{category}"], total["main_category"].nunique())
-    total = encode_time_f(total, temp, [f"{category}"])
-    category = "time"
-    temp = data_recat_freq(total, [f"{category}"], 5)
-    total = encode_time_f(total, temp, [f"{category}"])
-    category = "browser"
-    temp = data_recat_freq(total, [f"{category}"], 4)
-    total = encode_time_f(total, temp, [f"{category}"])
-    category = "os"
-    temp = data_recat_freq(total, [f"{category}"], 4)
-    total = encode_time_f(total, temp, [f"{category}"])
-
-    # CTR, rate
-    category = "dayweek"
-    temp = data_recat_rate(total, [f"{category}"], 3)  
-    total = encode_time(total, temp, [f"{category}"])
-    category = "user_id" # category changed to _recat    
-    temp = data_recat_rate(total, [category], 3)
-    total = encode_time(total, temp, [f"{category}"])
-    category = "campaign_id" # category changed to _recat
-    temp = data_recat_rate(total, [category], total[f"{category}"].nunique())
-    total = encode_time(total, temp, [f"{category}"])
-    category = "main_category" # category changed to _recat
-    temp = data_recat_rate(total, [f"{category}"], total[f"{category}"].nunique())  
-    total = encode_time(total, temp, [f"{category}"])
-    category = "sub_category"
-    temp = data_recat_rate(total, [f"{category}"], total["main_category"].nunique())  
-    total = encode_time(total, temp, [f"{category}"])
-    category = "time"
-    temp = data_recat_rate(total, [f"{category}"], 5)  
-    total = encode_time(total, temp, [f"{category}"])
-    # categorical_columns = ["browser", "os"]
-    category = "browser"
-    temp = data_recat_rate(total, [f"{category}"], 4)  
-    total = encode_time(total, temp, [f"{category}"])
-    category = "os"
-    temp = data_recat_rate(total, [f"{category}"], 3)  
-    total = encode_time(total, temp, [f"{category}"])
-
-    return total
-
-
-def read_files(paths):
+def read_files(paths) -> np.array:
     """
     batch reading files.
     """
-    data = pd.DataFrame()
-    if paths:
-        for file in paths:
-            df = pd.read_csv(file)
-            data = pd.concat([data, df], ignore_index=True)
-        data["datetime"] = pd.to_datetime(data["datetime"])
+    data = pd.read_csv(paths)
 
-    return data
+    return data.to_numpy()
 
 
-def data_process(data_p, cate):
-    """
-    process and drop irrelevant columns
-    """
-    data_p = data_p.drop("device", axis=1)
-    data_p = pd.merge(data_p, cate, left_on="article_id", right_on="article_id", how="left")
+def random_sample(X_train, y_target):
 
-    data_p = data_p.drop("article_id", axis=1)
-    data_p["time"] = data_p["datetime"].apply(lambda x: x.hour)
-    data_p["dayweek"] = data_p["datetime"].dt.day_name()
-    data_p["date"] = data_p["datetime"].dt.date
-    data_p = data_p.drop("datetime", axis=1)
+    positive_indices = np.where(y_target == 1)[0]
+    negative_indices = np.where(y_target == 0)[0]
+    positive_size = len(positive_indices)
 
-    return data_p
+    oversample_ratio = len(positive_indices) / len(negative_indices)
 
+    # initial random state
+    oversampled_indices = np.random.choice(negative_indices, size=int(0.5 * positive_size / oversample_ratio), replace=False)
+    undersampled_indices = np.random.choice(positive_indices, size=int(0.5 * positive_size / oversample_ratio), replace=True)
 
-def data_recat_freq(total, categorical_columns, n_clusters):
-    # distribution is very different, use frequency
-    frequency_tables = []
-    for column in categorical_columns:
-        frequency = total[column].value_counts()
-        frequency = frequency.reset_index()
-        frequency = frequency.rename(columns={"index": f"{column}", f"{column}": f"{column}_counts"})
-        frequency_tables.append(frequency)
-    
-    encode_tables = []
-    for table, category in zip(frequency_tables, categorical_columns):
-        time_dict = table.iloc[:, 1]
-        time_dict = time_dict.values.reshape(-1, 1)
-        time_dict = np.nan_to_num(time_dict, nan = 0)
-        if len(time_dict) > n_clusters:
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
-            time_dict = kmeans.fit_predict(time_dict)
-        table[f"{category}_recat_freq"] = time_dict
-        encode_tables.append(table)
+    balanced_indices = np.concatenate([oversampled_indices, undersampled_indices])
+    np.random.shuffle(balanced_indices)
 
-    return encode_tables
+    X_train_s = X_train[balanced_indices]
+    y_target_s = y_target[balanced_indices]
 
-def data_recat_rate(data_p, categorical_columns, n_clusters):
-    # distribution is almost same, then use rate
-    pivot_dfs = []
-    for column in categorical_columns:
-        percentage_df = data_p.groupby(['click', column]).size().reset_index(name='count')
-        percentage_df = percentage_df.groupby([column, 'click']).agg({"count": "sum"})
-        percentage_df = percentage_df.groupby(level=0, group_keys=False).apply(
-            lambda x: 100 * x / float(x.sum() + 0.001)).reset_index()
-        pivot_df = percentage_df.pivot(index=column, columns="click", values='count')
-        pivot_dfs.append(pivot_df)
+    X_train_tensor = torch.tensor(X_train_s, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_target_s, dtype=torch.float32)
 
-    encode_tables = []
-    for time_table, category in zip(pivot_dfs, categorical_columns):
-        time_dict = time_table[1]
-        time_dict = time_dict.values.reshape(-1, 1)
-        time_dict = np.nan_to_num(time_dict, nan = 0)
-        if len(time_dict) > n_clusters:
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
-            time_dict = kmeans.fit_predict(time_dict)
-        time_table[f"{category}_recat"] = time_dict
-        encode_tables.append(time_table)
-
-    return encode_tables
-
-
-def encode_time(data_p, encode_tables, categorical_columns):
-
-    for time_table, category in zip(encode_tables, categorical_columns):
-        data_p = pd.merge(data_p, time_table[f"{category}_recat"], left_on=category, right_on=category, how="left")
-        # data_p = data_p.drop(f"{category}", axis=1)
-
-    return data_p
-
-
-def encode_time_f(data_p, encode_tables, categorical_columns):
-    for time_table, category in zip(encode_tables, categorical_columns):
-        data_p = pd.merge(data_p, time_table[[f"{category}", f"{category}_recat_freq"]], left_on=category, right_on=category, how="left")
-        # data_p = data_p.drop(f"{category}", axis=1)
-
-    return data_p
-
-
-def user_encode(data_p, frequency_tables):
-
-    data_p = pd.merge(data_p, frequency_tables[0][["user_id", "user_id_is_elite"]], left_on="user_id", right_on="user_id", how="left")
-    data_p = data_p.drop("user_id", axis=1)
-
-    return data_p
-
-    # to be removed before submission
-    
-
-# forming statistical data
-def find_freq(data_p, categorical_columns):
-    # categorical_columns = ["dayweek", "user_id", "campaign_id", "main_category", "sub_category", "time", "browser", "os"]
-    frequency_tables = []
-    columns_to_log = ["user_id", "os", "browser"]
-    columns_to_reciprocal = []  # 
-    columns_to_linear_reciprocal= []  # 
-    # columns_to_add_reciprocal = ["os", "browser"]
-    for column in categorical_columns:   
-
-        if column == "dayweek":
-            freq = data_p.groupby(['dayweek', 'date']).size().reset_index(name='count')
-            count = freq.groupby("dayweek").size().reset_index(name = f"{column}_count")
-            frequency = data_p.groupby("dayweek").size().reset_index(name=f"{column}_sum")
-            frequency = pd.merge(frequency, count, left_on = "dayweek", right_on="dayweek", how = "left")
-            frequency[f"{column}_counts"] = frequency[f"{column}_sum"] / frequency[f"{column}_count"]
-            frequency = frequency.drop(f"{column}_sum", axis = 1)
-            frequency = frequency.drop(f"{column}_count", axis = 1)
-            frequency_tables.append(frequency)
-        else:
-            frequency = data_p[column].value_counts()
-            frequency = frequency.reset_index()
-            frequency = frequency.rename(columns={"index": f"{column}", f"{column}": f"{column}_counts"})
-            if column in columns_to_log:
-                frequency[f"{column}_counts"] = np.log(frequency[f"{column}_counts"])
-            elif column in columns_to_linear_reciprocal:
-                frequency[f"{column}_counts"] = -frequency[f"{column}_counts"] - 1 / frequency[f"{column}_counts"]
-            elif column in columns_to_reciprocal:
-                frequency[f"{column}_counts"] = -np.log(frequency[f"{column}_counts"])
-            # if column in columns_to_add_reciprocal:
-            #     frequency[f"{column}_counts_recip"] = 1 / frequency[f"{column}_counts"]
-            frequency_tables.append(frequency)
-    return frequency_tables
-
-
-def find_freq_recip(data_p, categorical_columns):
-    # categorical_columns = ["browser", "os"]
-    frequency_tables = []
-    for column in categorical_columns:  
-        frequency = data_p[column].value_counts()
-        frequency = frequency.reset_index()
-        frequency = frequency.rename(columns={"index": f"{column}", f"{column}": f"{column}_counts"})
-        frequency[f"{column}_counts_recip"] = 1 / frequency[f"{column}_counts"]
-        frequency_tables.append(frequency)
-
-    return frequency_tables
-
-def find_ctr(data_p, categorical_columns):
-    
-    pivot_dfs = []
-    columns_to_square = []
-    columns_to_recip = []
-    columns_to_log = ["user_id", "browser", "os"]  # move left 
-    # columns_to_log = []  # move left 
-    # columns_to_square = ["dayweek", "ti`me"]  # move right
-    columns_to_sqrt = []  # move left
-    columns_to_cubic = []  # move left
-    columns_to_exp = []
-    # columns_to_recip = ["browser", "os"]  # recp expo
-
-    for column in categorical_columns:
-        percentage_df = data_p.groupby(['click', column]).size().reset_index(name=f"{column}_rate")
-        percentage_df = percentage_df.groupby([column, 'click']).agg({f"{column}_rate": "sum"})
-        percentage_df = percentage_df.groupby(level=0, group_keys=False).apply(
-            lambda x: 100 * x / float(x.sum() + 0.001)).reset_index()
-    #         pivot_df = percentage_df.pivot(index=column, columns="click", values='count')
-    #         pivot_df = pivot_df.rename(columns = {"0": f"{column}_f", "1":f"{column}_rate"})
-    #         pivot_dfs.append(pivot_df)
-        if column in columns_to_log:
-            percentage_df[f"{column}_rate"] = np.log(percentage_df[f"{column}_rate"])
-        elif column in columns_to_square:
-            percentage_df[f"{column}_rate"] = np.square(percentage_df[f"{column}_rate"])
-        elif column in columns_to_sqrt:
-            percentage_df[f"{column}_rate"] = np.sqrt(percentage_df[f"{column}_rate"])
-        elif column in columns_to_exp:
-            percentage_df[f"{column}_rate"] = np.exp(percentage_df[f"{column}_rate"])
-        elif column in columns_to_recip:
-            percentage_df[f"{column}_rate"] = np.exp(1 / (percentage_df[f"{column}_rate"]))
-    #     print(f"{column} is going to have error?")
-        pivot_dfs.append(percentage_df[percentage_df["click"] == 1])
-        
-    return pivot_dfs
-
+    return X_train_tensor, y_train_tensor
 
 def main():
+    X_train = read_files(os.path.join(INPUT_DIR, "x_train.csv"))
+    y_target = read_files(os.path.join(INPUT_DIR, "y_target.csv"))
 
+    X_train = X_train[:, 1:]  # remove record id
+    y_target = y_target[:, 1:]  # remove record id
+    y_target = np.ravel(y_target)
 
+    X_train_tensor, y_train_tensor = random_sample(X_train, y_target)
+
+    # setting for NN model
+    embedding_sizes = X_train_tensor.shape[1]
+    model = CtrPredictionModel(categories_sizes=categorical_sizes,
+                               embedding_sizes=embedding_sizes,
+                               hidden_dim=hidden_dim)
+    criterion = nnf.binary_cross_entropy_with_logits
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)  # Adjust the learning rate as needed
+    # optimizer = optim.SGD(model.parameters(), lr=learning_rate, weight_decay=0.0)  #  compare with SGD optimizer
+
+    for epoch in tqdm(range(epochs)):
+
+        model.train()
+        for i in range(0, X_train_tensor.size(0), batch_size):
+            # Get mini-batch
+            batch_X = X_train_tensor[i:i + batch_size]
+            batch_y = y_train_tensor[i:i + batch_size]
+
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y.view(-1, 1))  # Assuming y_train_tensor is a column vector
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        if (epoch + 1) % 100 == 0:
+            print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
+
+        # prepare for next loop re-randomize index
+        X_train_tensor, y_train_tensor = random_sample(X_train, y_target)
+
+        if (epoch + 1) % 100 == 0 or epoch == epochs - 1:
+            torch.save(
+                model.state_dict(),
+                os.path.join(INPUT_DIR, f"train_model_{epoch:05d}.pt"),
+            )
     return 0
+
 
 if __name__ == '__main__':
     sys.exit(main())
