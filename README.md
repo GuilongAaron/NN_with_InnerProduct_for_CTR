@@ -1,7 +1,6 @@
 # Neural Network with InnerProduct Deployment for CTR Prediction
 
 ## background 
-
 CTR prediction is a very common task for ad evaluation and analysis.
 This program provides a simple neural network with inner product layer proposed by Y. Qu in the paper [Product-based Neural Networks for User Response Prediction](https://arxiv.org/pdf/1611.00144)
 
@@ -16,8 +15,10 @@ with linear signals $l_z$, quadratic signals $l_p$ and bias $b_1$.
 The linear signals can be obtained by $$l_z^n = W_z^n\odot z = \displaystyle\sum_{i=1}^N\displaystyle\sum_{j=1}^M\left(W_z^n\right)_{i,j}z_{i,j}$$
 quadratic signals can be obtained by $$l_p^n = W_p^n\odot p = \displaystyle\sum_{i-1}^N\displaystyle\sum_{j=1}^M\theta_i^n \theta_j^n \langle f_i, f_j\rangle = \langle \displaystyle\sum_{i=1}^N\delta_i^n,\displaystyle\sum_{i=1}^N\delta_i^n \rangle$$
 
-## input data
+## Evaluation
+Evaluation is omitted as the paper approves that the AUC performs better than those without product layer.
 
+## input data
 Train and target data are provided in the data folder.
 They are preprocessed data in percentage of display percentage and CTR for a certain category.
 
