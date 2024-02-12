@@ -7,7 +7,7 @@ This program provides a simple neural network with inner product layer proposed 
 
 ## Neural Netword Structure
 <p align="center">
-<img src=".\images\NN_structure.jpg" style="width:60%; border:0;">
+<img src=".\images\NN_Structure.jpg" style="width:60%; border:0;">
 </p>
 
 ## Fomulas in the Inner Product Layer
