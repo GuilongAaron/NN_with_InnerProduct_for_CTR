@@ -7,13 +7,13 @@ This program provides a simple neural network with inner product layer proposed 
 
 ## Neural Netword Structure
 <p align="center">
-<img src=".\images\NN_structure.jpg" style="width:60%; border:0;">
+<img src=".\images\NN_Structure.jpg" style="width:60%; border:0;">
 </p>
 
 ## Fomulas in the Inner Product Layer
 $l_1 \in \mathbb R^{D_1}$ is the output of the inner product layer, where $D_1$ is the dimension of the layer. The formulation of **$l_1$** is $$l_1 = relu(l_z + l_p + b_1)$$
 with linear signals $l_z$, quadratic signals $l_p$ and bias $b_1$.
-The linear signals can be obtained by $$l_z^n = W_z^n\odot z = \displaystyle\sum_{i=1}^N\displaystyle\sum_{j=1}^M\left(W_z^n\right)_{i,j} z_{i,j}$$
+
 quadratic signals can be obtained by $$l_p^n = W_p^n\odot p = \displaystyle\sum_{i-1}^N\displaystyle\sum_{j=1}^M\theta_i^n \theta_j^n \langle f_i, f_j\rangle = \langle \displaystyle\sum_{i=1}^N\delta_i^n,\displaystyle\sum_{i=1}^N\delta_i^n \rangle$$
 
 ## input data
